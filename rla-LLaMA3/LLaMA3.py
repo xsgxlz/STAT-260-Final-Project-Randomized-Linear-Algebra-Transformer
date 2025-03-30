@@ -271,11 +271,23 @@ class Transformer(nn.Module):
         self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
 
         # Precompute RoPE frequencies for the maximum sequence length
+        self.freqs_cis = None
+        self.update_freqs_cis(params.max_seq_len)
+
+    def update_freqs_cis(self, max_seq_len: int):
+        """
+        Update the precomputed RoPE frequencies for a new maximum sequence length.
+
+        Args:
+            max_seq_len (int): New maximum sequence length.
+        """
+        self.params.max_seq_len = max_seq_len
         self.freqs_cis = precompute_freqs_cis(
-            params.dim // params.n_heads,
-            params.max_seq_len * 2,
-            params.rope_theta,
+            self.params.dim // self.params.n_heads,
+            max_seq_len,
+            self.params.rope_theta,
         )
+        return self
 
     def forward(self, tokens: torch.Tensor):
         """
@@ -305,3 +317,4 @@ class Transformer(nn.Module):
         h = self.norm(h)  # Apply final normalization
         output = self.output(h).float()  # Project to vocabulary logits
         return output
+    
