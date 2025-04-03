@@ -19,6 +19,189 @@ class ModelArgs:
     rope_theta: float = 500000  # Base frequency for RoPE (Rotary Position Embedding)
     max_seq_len: int = 2048   # Maximum sequence length for precomputing RoPE frequencies
 
+    sketch_mode: str = 'rademacher'  # Type of random projection ('rademacher' or 'gaussian')
+    attention_qkv_sketch_size: int = 64 # Size of the sketch for query/key/value projections
+    attention_score_sketch_size: int = 64 # Size of the sketch for attention score projections
+    attention_weighed_sum_sketch_size: int = 64 # Size of the sketch for weighted sum projections
+    attention_out_sketch_size: int = 64 # Size of the sketch for output projections
+    feedforward_sketch_size_in: int = 64 # Size of the sketch for feed-forward projections
+    feedforward_sketch_size_out: int = 64 # Size of the sketch for output projections
+    rlamha: bool = False  # Flag to use randomized multi-head attention
+    deterministic: bool = False  # Flag to switch between deterministic and randomized computation
+
+def projection_sketch_mm(A, B, sketch_size, mode='rademacher'):
+    """
+    Approximates the matrix product A @ B using a projection sketch.
+
+    Args:
+        A: The first matrix (or batch of matrices).
+        B: The second matrix (or batch of matrices).
+        sketch_size: The size of the sketch (inner dimension of S).
+        mode: Type of random projection ('rademacher' or 'gaussian').
+
+    Returns:
+        The approximated matrix product.
+    """
+    # Ensure inputs are tensors
+    if not isinstance(A, torch.Tensor) or not isinstance(B, torch.Tensor):
+        raise TypeError("Inputs A and B must be torch tensors.")
+    if len(A.shape) != 3 or len(B.shape) != 2:
+        raise ValueError("Not supported now: A should be 3D and B should be 2D.")
+
+    # Determine shape for S: A(... m, n), B(... n, p) -> S(... n, c)
+    # A @ S @ S.T @ B
+    S_shape = (*A.shape[:-2], A.shape[-1], sketch_size)
+    device = A.device
+
+    if mode == 'rademacher':
+        # +/- 1 entries
+        S = (torch.randint(0, 2, S_shape, device=device, dtype=A.dtype) * 2 - 1)
+    elif mode == 'gaussian':
+        # N(0, 1) entries
+        S = torch.randn(S_shape, device=device, dtype=A.dtype)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+
+    # Scaling factor: E[S @ S.T] = sketch_size * I
+    # We need A @ (S @ S.T / sketch_size) @ B
+    # Compute as (A @ S / sketch_size) @ (S.T @ B)
+    scaling_factor = sketch_size
+    
+    # --- Check for potential dimension mismatch before matmul ---
+    if A.shape[-1] != S.shape[-2]:
+         raise RuntimeError(f"Matrix A last dim {A.shape[-1]} doesn't match S second-to-last dim {S.shape[-2]}")
+    if S.transpose(-1, -2).shape[-1] != B.shape[-2]:
+         raise RuntimeError(f"Matrix S.T last dim {S.transpose(-1, -2).shape[-1]} doesn't match B second-to-last dim {B.shape[-2]}")
+    # --- End Check ---
+
+    AS = torch.matmul(A, S) / scaling_factor
+    SB = torch.matmul(S.transpose(-1, -2), B)
+
+    # --- Check for potential dimension mismatch before final matmul ---
+    if AS.shape[-1] != SB.shape[-2]:
+         raise RuntimeError(f"Matrix AS last dim {AS.shape[-1]} doesn't match SB second-to-last dim {SB.shape[-2]}")
+    # --- End Check ---
+
+    AB_bar = torch.matmul(AS, SB)
+    return AB_bar
+
+class RLALinear(nn.Module):
+    r"""Applies a linear transformation using either standard or randomized matrix multiplication.
+
+    When deterministic=False, approximates y = x @ W.T + b using projection_sketch_mm.
+    When deterministic=True, computes y = x @ W.T + b exactly using F.linear.
+
+    Initialization is identical to torch.nn.Linear.
+
+    Args:
+        in_features: size of each input sample
+        out_features: size of each output sample
+        bias: If set to ``False``, the layer will not learn an additive bias. Default: ``True``
+        sketch_size: The intermediate dimension for the random projection sketch. Required if deterministic=False.
+        sketch_mode: The type of random projection ('rademacher' or 'gaussian'). Default: 'rademacher'.
+        deterministic: If ``True``, performs standard deterministic matrix multiplication. Default: ``False``.
+        device: Device for tensors.
+        dtype: Data type for tensors.
+
+    Shape:
+        - Input: :math:`(*, H_\text{in})` where :math:`*` means any number of
+          dimensions including none and :math:`H_\text{in} = \text{in\_features}`.
+        - Output: :math:`(*, H_\text{out})` where all but the last dimension
+          are the same shape as the input and :math:`H_\text{out} = \text{out\_features}`.
+
+    Attributes:
+        weight: the learnable weights of the module of shape
+            :math:`(\text{out\_features}, \text{in\_features})`. Initialized identically to nn.Linear.
+        bias:   the learnable bias of the module of shape :math:`(\text{out\_features})`.
+                Initialized identically to nn.Linear if bias=True.
+        sketch_size: The sketch dimension used for randomized multiplication.
+        sketch_mode: The mode for random projection ('rademacher' or 'gaussian').
+        deterministic: Flag to switch between deterministic and randomized computation.
+    """
+    __constants__ = ["in_features", "out_features", "sketch_size", "sketch_mode", "deterministic"]
+    in_features: int
+    out_features: int
+    sketch_size: int
+    sketch_mode: str
+    deterministic: bool
+    weight: torch.Tensor
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        sketch_size: int = 0, # Set default, but raise error if needed
+        sketch_mode: str = 'rademacher',
+        deterministic: bool = False,
+        device=None,
+        dtype=None,
+    ) -> None:
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.deterministic = deterministic
+        self.sketch_mode = sketch_mode
+
+        if not deterministic and sketch_size <= 0:
+            raise ValueError("sketch_size must be positive when deterministic is False")
+        self.sketch_size = sketch_size
+
+        self.weight = nn.parameter.Parameter(
+            torch.empty((out_features, in_features), **factory_kwargs)
+        )
+        if bias:
+            self.bias = nn.parameter.Parameter(torch.empty(out_features, **factory_kwargs))
+        else:
+            self.register_parameter("bias", None)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        # Replicates nn.Linear's initialization
+        # Setting a=sqrt(5) in kaiming_uniform is the same as initializing with
+        # uniform(-1/sqrt(in_features), 1/sqrt(in_features)). For details, see
+        # https://github.com/pytorch/pytorch/issues/57109
+        torch.nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            # Calculate fan_in from the weight tensor
+            fan_in, _ = torch.nn.init._calculate_fan_in_and_fan_out(self.weight)
+            # Calculate the bound based on fan_in
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            # Initialize bias with uniform distribution within the calculated bounds
+            torch.nn.init.uniform_(self.bias, -bound, bound)
+
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if self.deterministic:
+            # Use standard F.linear for deterministic computation
+            return F.linear(input, self.weight, self.bias)
+        else:
+            # Use randomized matrix multiplication
+            # F.linear computes input @ weight.T + bias
+            # So we need projection_sketch_mm(input, weight.T, ...)
+            output_no_bias = projection_sketch_mm(
+                input, self.weight.T, self.sketch_size, mode=self.sketch_mode
+            )
+            if self.bias is not None:
+                # Add bias if it exists
+                output_no_bias = output_no_bias + self.bias
+
+            return output_no_bias
+    
+    def deterministic_mode(self, enable: bool = True) -> "RLALinear":
+        # Set the deterministic mode
+        self.deterministic = enable
+        return self
+
+    def extra_repr(self) -> str:
+        # Provides a string representation including custom parameters
+        repr = f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"
+        if not self.deterministic:
+            repr += f", sketch_size={self.sketch_size}, sketch_mode='{self.sketch_mode}'"
+        repr += f", deterministic={self.deterministic}"
+        return repr
+
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     Repeat key/value heads to match the number of query heads if n_kv_heads < n_heads.
@@ -101,7 +284,7 @@ def apply_rotary_emb(
     xk = torch.stack([xk_row_0, xk_row_1], dim=-1).flatten(start_dim=-2)
     return xq, xk
 
-class Attention(nn.Module):
+class RLAAttention(nn.Module):
     """Multi-head attention module without KV caching."""
     def __init__(self, args: ModelArgs):
         """
@@ -118,11 +301,33 @@ class Attention(nn.Module):
         self.n_rep = self.n_local_heads // self.n_local_kv_heads  # Repetition factor for grouped-query attention
         self.head_dim = args.dim // args.n_heads  # Dimension per head
 
+        self.rlamha = args.rlamha  # Randomized Multi-Head Attention
+        self.attention_score_sketch_size = args.attention_score_sketch_size
+        self.attention_weighed_sum_sketch_size = args.attention_weighed_sum_sketch_size
+
         # Linear projections for query, key, value, and output
+        '''
         self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
         self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
+        '''
+        self.q_dim = args.n_heads * self.head_dim
+        self.kv_dim = self.n_kv_heads * self.head_dim
+        qkv_dim = self.q_dim + self.kv_dim * 2
+        self.wqkv = RLALinear(args.dim, qkv_dim, bias=False,
+                              sketch_size=args.attention_qkv_sketch_size, sketch_mode=args.sketch_mode,
+                              deterministic=args.deterministic)
+        self.wo = RLALinear(args.n_heads * self.head_dim, args.dim, bias=False,
+                            sketch_size=args.attention_out_sketch_size, sketch_mode=args.sketch_mode,
+                            deterministic=args.deterministic)
+
+    def deterministic_mode(self, enable: bool = True) -> "RLAAttention":
+        # Set the deterministic mode for the attention layer
+        self.wqkv.deterministic_mode(enable)
+        self.wo.deterministic_mode(enable)
+        self.rlamha = enable
+        return self
 
     def forward(
         self,
@@ -143,7 +348,11 @@ class Attention(nn.Module):
         """
         bsz, seqlen, _ = x.shape
         # Project input to queries, keys, and values
+        '''
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+        '''
+        xqkv = self.wqkv(x)  # Shape: (bsz, seqlen, q_dim + kv_dim * 2)
+        xq, xk, xv = xqkv.split([self.q_dim, self.kv_dim, self.kv_dim], dim=-1)  # Split into q, k, v
 
         # Reshape for multi-head attention
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
@@ -177,7 +386,7 @@ class Attention(nn.Module):
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return self.wo(output)
 
-class FeedForward(nn.Module):
+class RLAFeedForward(nn.Module):
     """Feed-forward network with gated activation (e.g., SwiGLU variant)."""
     def __init__(
         self,
@@ -185,6 +394,10 @@ class FeedForward(nn.Module):
         out_dim: int,
         hidden_dim: int,
         bias: bool = False,
+        sketch_size_in: int = 0,
+        sketch_size_out: int = 0,
+        sketch_mode: str = 'rademacher',
+        deterministic: bool = False,
     ):
         """
         Initialize FeedForward module.
@@ -196,13 +409,29 @@ class FeedForward(nn.Module):
             bias (bool): Whether to include bias in linear layers. Defaults to False.
         """
         super().__init__()
+        '''
         self.w1 = nn.Linear(in_dim, hidden_dim, bias)  # First projection
         self.w2 = nn.Linear(hidden_dim, out_dim, bias)  # Output projection
         self.w3 = nn.Linear(in_dim, hidden_dim, bias)  # Gate projection
+        '''
+        self.w13 = RLALinear(in_dim, hidden_dim * 2, bias=bias,
+                             sketch_size=sketch_size_in, sketch_mode=sketch_mode,
+                             deterministic=deterministic)
+        self.w2 = RLALinear(hidden_dim, out_dim, bias=bias, 
+                            sketch_size=sketch_size_out, sketch_mode=sketch_mode,
+                            deterministic=deterministic)
+        
+    def deterministic_mode(self, enable: bool = True) -> "RLAFeedForward":
+        # Set the deterministic mode for the feed-forward layer
+        self.w13.deterministic_mode(enable)
+        self.w2.deterministic_mode(enable)
+        return self
 
     def forward(self, x):
         """Apply gated feed-forward computation: w2(silu(w1(x)) * w3(x))."""
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        x13 = self.w13(x)  # Shape: (bsz, seqlen, hidden_dim * 2)
+        x1, x3 = x13.chunk(2, dim=-1)  # Split into two parts
+        return self.w2(F.silu(x1) * x3)  # Apply gated activation and output projection
 
 class TransformerBlock(nn.Module):
     """Single Transformer block with attention and feed-forward layers."""
@@ -214,15 +443,26 @@ class TransformerBlock(nn.Module):
             args (ModelArgs): Model configuration parameters.
         """
         super().__init__()
-        self.attention = Attention(args)  # Multi-head attention layer
-        self.feed_forward = FeedForward(
+        self.attention = RLAAttention(args)  # Multi-head attention layer
+        self.feed_forward = RLAFeedForward(
             in_dim=args.dim,
             out_dim=args.dim,
             hidden_dim=args.hidden_dim,
+            bias=False,
+            sketch_size_in=args.feedforward_sketch_size_in,
+            sketch_size_out=args.feedforward_sketch_size_out,
+            sketch_mode=args.sketch_mode,
+            deterministic=args.deterministic,
         )  # Feed-forward layer
         # Use PyTorch's RMSNorm for normalization
         self.attention_norm = nn.RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = nn.RMSNorm(args.dim, eps=args.norm_eps)
+
+    def deterministic_mode(self, enable: bool = True) -> "TransformerBlock":
+        # Set the deterministic mode for the transformer block
+        self.attention.deterministic_mode(enable)
+        self.feed_forward.deterministic_mode(enable)
+        return self
 
     def forward(
         self,
@@ -287,6 +527,12 @@ class Transformer(nn.Module):
             max_seq_len,
             self.params.rope_theta,
         )
+        return self
+    
+    def deterministic_mode(self, enable: bool = True) -> "Transformer":
+        # Set the deterministic mode for all transformer layers
+        for layer in self.layers:
+            layer.deterministic_mode(enable)
         return self
 
     def forward(self, tokens: torch.Tensor):
