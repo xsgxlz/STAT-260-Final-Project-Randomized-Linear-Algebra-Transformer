@@ -1,7 +1,7 @@
 import argparse
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import functools
@@ -67,6 +67,17 @@ def name_args(args, sep):
 
     return dict_name, file_name
 
+def str_to_bool(v):
+    """Convert string input to boolean value."""
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected (e.g., True, False, yes, no, 1, 0).')
+
 @dataclass(frozen=True)
 class Args:
     # Training parameters
@@ -78,18 +89,31 @@ class Args:
     grad_clip_max_norm: float = 5.0
     use_amp: bool = False
     use_compile: bool = False
+    model_type: str = "node" # Added model_type here
 
     # Data parameters
     task: str = "number_add"
     max_level: int = 40
     random_seq_len: bool = True
-    number_range: tuple[int, int] = (0, 99)
+    # Use field for mutable default like tuple
+    number_range: tuple[int, int] = field(default_factory=lambda: (0, 99))
 
     # Model architecture parameters
     dim: int = 24
     n_layers: int = 2
     n_heads: int = 4
     hidden_dim: int = 84
+    # n_kv_heads: Optional[int] = None # Not needed per request
+
+    # RLA parameters - Added section
+    sketch_mode: str = 'rademacher'
+    attention_qkv_sketch_size: int = 0 # Sketch for Wq, Wk, Wv projections
+    attention_out_sketch_size: int = 0 # Sketch for Wo projection
+    feedforward_sketch_size_in: int = 0 # Sketch for FeedForward w1/w3
+    feedforward_sketch_size_out: int = 0 # Sketch for FeedForward w2
+    attention_score_sketch_size: int = 0 # Sketch for QK^T. 0 means deterministic.
+    attention_weighed_sum_sketch_size: int = 0 # Sketch for Scores@V. 0 means deterministic.
+    deterministic: bool = False # Global switch for RLA layers.
 
     # Save path
     save_path: str = ""
@@ -99,6 +123,7 @@ class Args:
         """Return a formatted string representation of the Args object."""
         # Define groups of parameters
         training_params = [
+            f"model_type:         {self.model_type}", # Added model_type
             f"standard_lr:        {self.standard_lr:.1e}",
             f"standard_epoch:     {self.standard_epoch}",
             f"standard_warmup_steps: {self.standard_warmup_steps}",
@@ -106,26 +131,38 @@ class Args:
             f"min_lr:             {self.min_lr:.1e}",
             f"grad_clip_max_norm: {self.grad_clip_max_norm:.1f}",
             f"use_amp:            {self.use_amp}",
-            f"use_compile:       {self.use_compile}",
+            f"use_compile:        {self.use_compile}",
         ]
-        
+
         data_params = [
-            f"task:              {self.task}",
-            f"max_level:         {self.max_level}",
-            f"random_seq_len:    {self.random_seq_len}",
-            f"number_range:      {self.number_range}",
+            f"task:               {self.task}",
+            f"max_level:          {self.max_level}",
+            f"random_seq_len:     {self.random_seq_len}",
+            f"number_range:       {self.number_range}",
         ]
-        
+
         model_params = [
-            f"dim:               {self.dim}",
-            f"n_layers:          {self.n_layers}",
-            f"n_heads:           {self.n_heads}",
-            f"hidden_dim:        {self.hidden_dim}",
+            f"dim:                {self.dim}",
+            f"n_layers:           {self.n_layers}",
+            f"n_heads:            {self.n_heads}",
+            f"hidden_dim:         {self.hidden_dim}",
         ]
-        
+
+        # Added RLA parameters section
+        rla_params = [
+            f"sketch_mode:        {self.sketch_mode}",
+            f"deterministic:      {self.deterministic}",
+            f"attn_qkv_sketch:    {self.attention_qkv_sketch_size}",
+            f"attn_out_sketch:    {self.attention_out_sketch_size}",
+            f"ffn_in_sketch:      {self.feedforward_sketch_size_in}",
+            f"ffn_out_sketch:     {self.feedforward_sketch_size_out}",
+            f"attn_score_sketch:  {self.attention_score_sketch_size}",
+            f"attn_sum_sketch:    {self.attention_weighed_sum_sketch_size}",
+        ]
+
         save_params = [
-            f"save_path:         {self.save_path}",
-            f"final_save_path:   {self.final_save_path}",
+            f"save_path:          {self.save_path}",
+            f"final_save_path:    {self.final_save_path}",
         ]
 
         # Combine sections with headers
@@ -133,16 +170,17 @@ class Args:
             ("Training Parameters", training_params),
             ("Data Parameters", data_params),
             ("Model Architecture Parameters", model_params),
+            ("RLA Parameters", rla_params), # Added RLA section
             ("Save Path Parameters", save_params),
         ]
-        
+
         # Build the formatted string
         output = "Args Configuration:\n"
         for header, params in sections:
             output += f"\n{header}:\n"
             output += "\n".join([f"  {param}" for param in params])
             output += "\n"
-        
+
         return output.rstrip()  # Remove trailing newline
 
 def str_to_bool(v):
@@ -159,11 +197,12 @@ def str_to_bool(v):
 def parse_args():
     """Parse command-line arguments and return an Args object."""
     parser = argparse.ArgumentParser(description="Training script with configurable parameters.")
-    
+
     # Grouping arguments
     training_group = parser.add_argument_group("Training Parameters")
     data_group = parser.add_argument_group("Data Parameters")
     model_group = parser.add_argument_group("Model Architecture Parameters")
+    rla_group = parser.add_argument_group("RLA Parameters") # Added RLA group
     save_group = parser.add_argument_group("Save Path Parameters")
 
     # Training Parameters
@@ -206,6 +245,25 @@ def parse_args():
     model_group.add_argument("--hidden_dim", type=int, default=84,
                              help="Hidden dimension (default: 84)")
 
+    # RLA Parameters - Added arguments
+    rla_group.add_argument("--sketch_mode", type=str, default='rademacher', choices=['rademacher', 'gaussian'],
+                           help="Type of random projection sketch (default: rademacher)")
+    rla_group.add_argument("--deterministic", type=str_to_bool, default=False,
+                           help="Globally disable RLA and use standard layers/ops (default: False)")
+    rla_group.add_argument("--attn_qkv_sketch_size", type=int, default=0,
+                           help="Sketch size for Wq, Wk, Wv projections in Attention (0 = deterministic, default: 0)")
+    rla_group.add_argument("--attn_out_sketch_size", type=int, default=0,
+                           help="Sketch size for Wo projection in Attention (0 = deterministic, default: 0)")
+    rla_group.add_argument("--ffn_in_sketch_size", type=int, default=0,
+                           help="Sketch size for first/third FFN projection (0 = deterministic, default: 0)")
+    rla_group.add_argument("--ffn_out_sketch_size", type=int, default=0,
+                           help="Sketch size for second FFN projection (0 = deterministic, default: 0)")
+    rla_group.add_argument("--attn_score_sketch_size", type=int, default=0,
+                           help="Sketch size for QK^T in SDPA (0 = deterministic, default: 0)")
+    rla_group.add_argument("--attn_sum_sketch_size", type=int, default=0,
+                           help="Sketch size for Scores@V in SDPA (0 = deterministic, default: 0)")
+
+
     # Save Path Parameters
     save_group.add_argument("--save_path", type=str, default="",
                             help="Path to save checkpoints (default: '')")
@@ -218,7 +276,7 @@ def parse_args():
     # Convert number_range to tuple
     number_range_tuple = tuple(args.number_range)
 
-    # Create Args object with parsed values
+    # Create Args object with parsed values, including RLA parameters
     args_obj = Args(
         model_type=args.model_type,
         standard_lr=args.standard_lr,
@@ -237,6 +295,16 @@ def parse_args():
         n_layers=args.n_layers,
         n_heads=args.n_heads,
         hidden_dim=args.hidden_dim,
+        # RLA parameters added here
+        sketch_mode=args.sketch_mode,
+        deterministic=args.deterministic,
+        attention_qkv_sketch_size=args.attn_qkv_sketch_size,
+        attention_out_sketch_size=args.attn_out_sketch_size,
+        feedforward_sketch_size_in=args.ffn_in_sketch_size,
+        feedforward_sketch_size_out=args.ffn_out_sketch_size,
+        attention_score_sketch_size=args.attn_score_sketch_size,
+        attention_weighed_sum_sketch_size=args.attn_sum_sketch_size,
+        # End RLA parameters
         save_path=args.save_path,
         final_save_path=args.final_save_path,
     )
