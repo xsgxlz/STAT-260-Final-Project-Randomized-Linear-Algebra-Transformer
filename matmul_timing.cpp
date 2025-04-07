@@ -242,6 +242,22 @@ double relative_frobenius_error(const Matrix &A_exact, const Matrix &B_approx)
     return norm_diff / norm_exact;
 }
 
+double get_condition_number(const Matrix &A)
+{
+    if (A.empty())
+        return 0.0;
+    const size_t n = A.size();
+    const size_t m = A[0].size();
+    std::vector<double> singular_values(std::min(n, m), 0.0);
+    for (size_t i = 0; i < singular_values.size(); ++i)
+    {
+        singular_values[i] = frobenius_norm(A);
+    }
+    std::sort(singular_values.begin(), singular_values.end(), std::greater<double>());
+    double cond_num = singular_values[0] / singular_values.back();
+    return cond_num;
+}
+
 // --- Benchmarking ---
 int main()
 {
@@ -252,18 +268,20 @@ int main()
     // --- Configuration ---
     size_t n = 256;                                           // Rows of A
     size_t m = 512;                                           // Cols of A / Rows of B
-    size_t p = 256;                                           // Cols of B
+    size_t p = 1024;                                           // Cols of B
     std::vector<size_t> sketch_dims = {16, 32, 64, 128, 256}; // Values of k to test
 
     std::cout << "Benchmarking Matrix Multiplication\n";
     std::cout << "Matrix A: " << n << "x" << m << "\n";
     std::cout << "Matrix B: " << m << "x" << p << "\n";
-    std::cout << "-----------------------------------------------------------\n";
+    std::cout << "--------------------------------------------------------------------\n";
     std::cout << std::left << std::setw(15) << "Method"
               << std::setw(10) << "k"
               << std::setw(15) << "Time (ms)"
-              << std::setw(20) << "Rel Frob Error" << std::endl;
-    std::cout << "-----------------------------------------------------------\n";
+              << std::setw(20) << "Rel Frob Error" 
+              << std::setw(20) << "Cond Num" 
+              << std::endl;
+    std::cout << "--------------------------------------------------------------------\n";
 
     // --- Create and Fill Matrices ---
     Matrix A = create_matrix(n, m);
@@ -280,7 +298,9 @@ int main()
     std::cout << std::left << std::setw(15) << "Exact"
               << std::setw(10) << "-"
               << std::setw(15) << duration_ms
-              << std::setw(20) << "0.0" << std::endl;
+              << std::setw(20) << "0.0" 
+              << std::setw(20) << get_condition_number(C_exact)
+              << std::endl;
 
     // --- Time Randomized MatMul ---
     for (size_t k : sketch_dims)
@@ -295,10 +315,12 @@ int main()
         auto duration_gaussian = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
         double error_gaussian = relative_frobenius_error(C_exact, C_gaussian);
 
-        std::cout << std::left << std::setw(15) << "Rand Gaussian"
+        std::cout << std::left << std::setw(15) << "Gaussian"
                   << std::setw(10) << k
                   << std::setw(15) << duration_gaussian
-                  << std::fixed << std::setprecision(5) << std::setw(20) << error_gaussian << std::endl;
+                  << std::fixed << std::setprecision(5) << std::setw(20) << error_gaussian 
+                  << std::setw(20) << get_condition_number(C_gaussian) 
+                  << std::endl;
 
         // Rademacher Sketch
         start_time = std::chrono::high_resolution_clock::now();
@@ -307,15 +329,21 @@ int main()
         auto duration_rademacher = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
         double error_rademacher = relative_frobenius_error(C_exact, C_rademacher);
 
-        std::cout << std::left << std::setw(15) << "Rand Rademacher"
+        std::cout << std::left << std::setw(15) << "Rademacher"
                   << std::setw(10) << k
                   << std::setw(15) << duration_rademacher
-                  << std::fixed << std::setprecision(5) << std::setw(20) << error_rademacher << std::endl;
+                  << std::fixed << std::setprecision(5) << std::setw(20) << error_rademacher 
+                  << std::setw(20) << get_condition_number(C_rademacher) 
+                  << std::endl;
     }
-    std::cout << "-----------------------------------------------------------\n";
+    std::cout << "--------------------------------------------------------------------\n";
+
+    std::cout << "Condition Number of A: " << get_condition_number(A) << std::endl;
+    std::cout << "Condition Number of B: " << get_condition_number(B) << std::endl;
+    std::cout << "--------------------------------------------------------------------\n";
 
     // --- Example with smaller dimensions for verification (optional) ---
-    // /*
+    /*
     std::cout << "\nVerification with small matrices (3x4 * 4x2):\n";
     Matrix A_small = {{1, 2, 3, 4}, {5, 6, 7, 8}, {9, 1, 2, 3}};
     Matrix B_small = {{1, 2}, {3, 4}, {5, 6}, {7, 8}};
@@ -343,7 +371,7 @@ int main()
     print_matrix(C_rade_small);
     std::cout << "Error: " << relative_frobenius_error(C_exact_small, C_rade_small) << std::endl
               << std::endl;
-    // */
+    */
 
     return 0;
 }
