@@ -272,7 +272,7 @@ class Transformer(nn.Module):
         #     self.output.deterministic_mode(enable)
         return self
 
-    def forward(self, tokens: torch.Tensor):
+    def forward(self, tokens: torch.Tensor, return_transformer_output: bool = False):
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
 
@@ -288,5 +288,8 @@ class Transformer(nn.Module):
         for layer in self.layers:
             h = layer(h, freqs_cis) # Pass freqs_cis, is_causal=True is handled inside block
         h = self.norm(h)
-        output = self.output(h).float()
-        return output
+        output = self.output(h)
+        if return_transformer_output:
+            return output, h
+        else:
+            return output

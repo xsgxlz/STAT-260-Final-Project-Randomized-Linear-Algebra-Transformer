@@ -46,21 +46,11 @@ def spearman_correlation(x, y):
     rho = 1 - 6 * torch.sum(d ** 2) / (n * (n ** 2 - 1))
     return rho
 
-def transformer_forward_pass(tokens, model):
-    return model(tokens)
-
 def name_args(args, sep):
     dict_path_args = [args.task, args.max_level, args.random_seq_len, args.number_range]
     model_args = [args.model_type, args.dim, args.n_layers, args.n_heads, args.hidden_dim, args.batch_size]
 
-    if args.model_type == "transformer":
-        file_name_args = model_args
-    elif args.model_type == "node":
-        node_args = [args.range_max - args.range_min, args.tol_base, args.tol_ratio, args.energy_penalty]
-        file_name_args = model_args + node_args
-    elif args.model_type == "looped_transformer":
-        looped_transformer_args = [args.n_loops, args.n_layers_per_loop, args.loop_step_method]
-        file_name_args = model_args + looped_transformer_args
+    file_name_args = model_args
 
     dict_name = sep.join(map(str, dict_path_args))
     file_name = sep.join(map(str, file_name_args))
