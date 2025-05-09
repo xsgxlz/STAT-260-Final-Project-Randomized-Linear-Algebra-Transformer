@@ -294,7 +294,7 @@ def rla_scaled_dot_product_attention(
         attn_weight = sample_and_project_mm(
             query, # (..., H, L, E_q)
             key.transpose(-2, -1), # (..., H, E_q, S)
-            sample_exact_dim=sample_exact_dim_qk,
+            sample_without_dim=sample_exact_dim_qk,
             projection_dim=sketch_size_qk,
             projection_mode=sketch_mode
         ) * scale_factor
@@ -313,7 +313,7 @@ def rla_scaled_dot_product_attention(
         output = sample_and_project_mm(
             attn_weight, # (..., H, L, S)
             value,       # (..., H, S, E_v)
-            sample_exact_dim=sample_exact_dim_sv,
+            sample_without_dim=sample_exact_dim_sv,
             projection_dim=sketch_size_sv,
             projection_mode=sketch_mode
         )
