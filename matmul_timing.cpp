@@ -266,10 +266,10 @@ int main()
     std::mt19937 rng(rd());
 
     // --- Configuration ---
-    size_t n = 256;                                           // Rows of A
-    size_t m = 512;                                           // Cols of A / Rows of B
-    size_t p = 1024;                                           // Cols of B
-    std::vector<size_t> sketch_dims = {16, 32, 64, 128, 256}; // Values of k to test
+    size_t n = 100;                                           // Rows of A
+    size_t m = 100;                                           // Cols of A / Rows of B
+    size_t p = 10;                                           // Cols of B
+    std::vector<size_t> sketch_dims = {8, 16, 32, 64, 100}; // Values of k to test
 
     std::cout << "Benchmarking Matrix Multiplication\n";
     std::cout << "Matrix A: " << n << "x" << m << "\n";
