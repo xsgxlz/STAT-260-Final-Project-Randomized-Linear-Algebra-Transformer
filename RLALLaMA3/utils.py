@@ -48,9 +48,9 @@ def spearman_correlation(x, y):
 
 def name_args(args, sep):
     dict_path_args = [args.task, args.max_level, args.random_seq_len, args.number_range]
-    model_args = [args.model_type, args.dim, args.n_layers, args.n_heads, args.hidden_dim, args.batch_size]
-
-    file_name_args = model_args
+    model_args = [args.deterministic, args.dim, args.n_layers, args.n_heads, args.hidden_dim, args.batch_size]
+    rla_args = [args.sketch_mode, args.rla_attn_qkv_sample_exact_dim, args.rla_attn_qkv_projection_dim, args.rla_attn_out_sample_exact_dim, args.rla_attn_out_projection_dim, args.rla_ffn_in_sample_exact_dim, args.rla_ffn_in_projection_dim, args.rla_ffn_out_sample_exact_dim, args.rla_ffn_out_projection_dim, args.rla_sdpa_qk_sample_exact_dim, args.rla_sdpa_qk_projection_dim, args.rla_sdpa_sv_sample_exact_dim, args.rla_sdpa_sv_projection_dim]
+    file_name_args = model_args + rla_args
 
     dict_name = sep.join(map(str, dict_path_args))
     file_name = sep.join(map(str, file_name_args))
@@ -82,7 +82,7 @@ class Args:
     grad_clip_max_norm: float = 5.0
     use_amp: bool = False
     use_compile: bool = False
-    model_type: str = "node"
+    model_type: str = "transformer"
 
     # Data parameters
     task: str = "number_add"
