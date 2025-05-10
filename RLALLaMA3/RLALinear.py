@@ -146,7 +146,7 @@ class RLALinear(nn.Module):
             output_no_bias = sample_and_project_mm(
                 A=input,                 # Shape: (..., in_features)
                 B=self.weight.T,         # Shape: (in_features, out_features)
-                sample_exact_dim=self.sample_exact_dim, # along in_features
+                sample_without_dim=self.sample_exact_dim, # along in_features
                 projection_dim=self.projection_dim,     # for the remainder of in_features
                 projection_mode=self.projection_mode
             )

@@ -6,9 +6,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Assuming these are in a separate file or defined above
-from .RLALinear import RLALinear # Import RLALinear
-from .RLACore import rla_scaled_dot_product_attention # Import the SDPA function
+# Change relative imports to absolute imports
+from RLALLaMA3.RLALinear import RLALinear
+from RLALLaMA3.RLACore import rla_scaled_dot_product_attention
 
 # Modified ModelArgs without rlamhafrom dataclasses import dataclass, field
 from typing import Optional
