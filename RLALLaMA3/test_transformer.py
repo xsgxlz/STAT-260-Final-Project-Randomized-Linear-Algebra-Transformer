@@ -2,9 +2,17 @@ import torch
 import pytest
 from RLALLaMA3.LLaMA3 import ModelArgs, Transformer
 
+"""
+To run this test:
+# source your virtual env
+cd RLALLaMA3
+python -m pytest test_transformer.py -s
+"""
+
+
 def test_transformer_rla():
     # Model parameters
-    dim = 64  # Small dimension for testing
+    dim = 64
     n_heads = 4
     n_layers = 2
     vocab_size = 1000
