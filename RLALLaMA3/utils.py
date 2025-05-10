@@ -68,6 +68,9 @@ def str_to_bool(v):
     else:
         raise argparse.ArgumentTypeError('Boolean value expected (e.g., True, False, yes, no, 1, 0).')
 
+from dataclasses import dataclass, field
+from typing import Optional, Tuple # Optional might be needed if n_kv_heads is re-introduced
+
 @dataclass(frozen=True)
 class Args:
     # Training parameters
@@ -79,13 +82,12 @@ class Args:
     grad_clip_max_norm: float = 5.0
     use_amp: bool = False
     use_compile: bool = False
-    model_type: str = "node" # Added model_type here
+    model_type: str = "node"
 
     # Data parameters
     task: str = "number_add"
     max_level: int = 40
     random_seq_len: bool = True
-    # Use field for mutable default like tuple
     number_range: tuple[int, int] = field(default_factory=lambda: (0, 99))
 
     # Model architecture parameters
@@ -93,17 +95,29 @@ class Args:
     n_layers: int = 2
     n_heads: int = 4
     hidden_dim: int = 84
-    # n_kv_heads: Optional[int] = None # Not needed per request
+    # n_kv_heads: Optional[int] = None # Kept commented as per original Args
 
-    # RLA parameters - Added section
-    sketch_mode: str = 'rademacher'
-    attention_qkv_sketch_size: int = 0 # Sketch for Wq, Wk, Wv projections
-    attention_out_sketch_size: int = 0 # Sketch for Wo projection
-    feedforward_sketch_size_in: int = 0 # Sketch for FeedForward w1/w3
-    feedforward_sketch_size_out: int = 0 # Sketch for FeedForward w2
-    attention_score_sketch_size: int = 0 # Sketch for QK^T. 0 means deterministic.
-    attention_weighed_sum_sketch_size: int = 0 # Sketch for Scores@V. 0 means deterministic.
-    deterministic: bool = False # Global switch for RLA layers.
+    # --- Randomized Linear Algebra (RLA) Parameters ---
+    deterministic: bool = False # Global switch for RLA. If True, all RLA approximations are disabled.
+    sketch_mode: str = 'rademacher' # Default projection mode ('rademacher' or 'gaussian')
+
+    # RLA for Attention Linear Layers (Wq, Wk, Wv, Wo)
+    rla_attn_qkv_sample_exact_dim: int = 0
+    rla_attn_qkv_projection_dim: int = 0
+    rla_attn_out_sample_exact_dim: int = 0
+    rla_attn_out_projection_dim: int = 0
+
+    # RLA for Feed-Forward Network (FFN) Linear Layers
+    rla_ffn_in_sample_exact_dim: int = 0
+    rla_ffn_in_projection_dim: int = 0
+    rla_ffn_out_sample_exact_dim: int = 0
+    rla_ffn_out_projection_dim: int = 0
+
+    # RLA for Scaled Dot-Product Attention (SDPA) internal matmuls
+    rla_sdpa_qk_sample_exact_dim: int = 0
+    rla_sdpa_qk_projection_dim: int = 0   # Was attention_score_sketch_size
+    rla_sdpa_sv_sample_exact_dim: int = 0
+    rla_sdpa_sv_projection_dim: int = 0   # Was attention_weighed_sum_sketch_size
 
     # Save path
     save_path: str = ""
@@ -111,9 +125,8 @@ class Args:
 
     def __str__(self):
         """Return a formatted string representation of the Args object."""
-        # Define groups of parameters
         training_params = [
-            f"model_type:         {self.model_type}", # Added model_type
+            f"model_type:         {self.model_type}",
             f"standard_lr:        {self.standard_lr:.1e}",
             f"standard_epoch:     {self.standard_epoch}",
             f"standard_warmup_steps: {self.standard_warmup_steps}",
@@ -138,16 +151,27 @@ class Args:
             f"hidden_dim:         {self.hidden_dim}",
         ]
 
-        # Added RLA parameters section
         rla_params = [
-            f"sketch_mode:        {self.sketch_mode}",
             f"deterministic:      {self.deterministic}",
-            f"attn_qkv_sketch:    {self.attention_qkv_sketch_size}",
-            f"attn_out_sketch:    {self.attention_out_sketch_size}",
-            f"ffn_in_sketch:      {self.feedforward_sketch_size_in}",
-            f"ffn_out_sketch:     {self.feedforward_sketch_size_out}",
-            f"attn_score_sketch:  {self.attention_score_sketch_size}",
-            f"attn_sum_sketch:    {self.attention_weighed_sum_sketch_size}",
+            f"sketch_mode:        {self.sketch_mode}",
+            "",
+            "  # For Attention Linear Layers (Wq, Wk, Wv, Wo):",
+            f"  attn_qkv_sample_exact_dim: {self.rla_attn_qkv_sample_exact_dim}",
+            f"  attn_qkv_projection_dim: {self.rla_attn_qkv_projection_dim}",
+            f"  attn_out_sample_exact_dim: {self.rla_attn_out_sample_exact_dim}",
+            f"  attn_out_projection_dim: {self.rla_attn_out_projection_dim}",
+            "",
+            "  # For Feed-Forward Network (FFN) Linear Layers:",
+            f"  ffn_in_sample_exact_dim:   {self.rla_ffn_in_sample_exact_dim}",
+            f"  ffn_in_projection_dim:   {self.rla_ffn_in_projection_dim}",
+            f"  ffn_out_sample_exact_dim:  {self.rla_ffn_out_sample_exact_dim}",
+            f"  ffn_out_projection_dim:  {self.rla_ffn_out_projection_dim}",
+            "",
+            "  # For Scaled Dot-Product Attention (SDPA) internal matmuls:",
+            f"  sdpa_qk_sample_exact_dim: {self.rla_sdpa_qk_sample_exact_dim}",
+            f"  sdpa_qk_projection_dim: {self.rla_sdpa_qk_projection_dim}",
+            f"  sdpa_sv_sample_exact_dim: {self.rla_sdpa_sv_sample_exact_dim}",
+            f"  sdpa_sv_projection_dim: {self.rla_sdpa_sv_projection_dim}",
         ]
 
         save_params = [
@@ -155,23 +179,26 @@ class Args:
             f"final_save_path:    {self.final_save_path}",
         ]
 
-        # Combine sections with headers
         sections = [
             ("Training Parameters", training_params),
             ("Data Parameters", data_params),
             ("Model Architecture Parameters", model_params),
-            ("RLA Parameters", rla_params), # Added RLA section
+            ("RLA Parameters", rla_params),
             ("Save Path Parameters", save_params),
         ]
 
-        # Build the formatted string
-        output = "Args Configuration:\n"
-        for header, params in sections:
-            output += f"\n{header}:\n"
-            output += "\n".join([f"  {param}" for param in params])
-            output += "\n"
-
-        return output.rstrip()  # Remove trailing newline
+        output_str = "Args Configuration:\n" # Renamed from 'output' to avoid conflict
+        for header, params_list in sections: # Renamed params to params_list
+            output_str += f"\n{header}:\n"
+            # For RLA params, print them directly as they are already formatted with comments and spacing
+            if header == "RLA Parameters":
+                for param_line in params_list:
+                    output_str += f"  {param_line}\n" # Add indent and newline
+            else:
+                output_str += "\n".join([f"  {param_line}" for param_line in params_list]) # param_line was param
+                output_str += "\n"
+        
+        return output_str.rstrip()
 
 def str_to_bool(v):
     """Convert string input to boolean value."""
