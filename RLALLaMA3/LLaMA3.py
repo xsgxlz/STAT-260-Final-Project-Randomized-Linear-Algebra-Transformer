@@ -385,7 +385,7 @@ class Transformer(nn.Module):
         #     self.output.deterministic_mode(enable)
         return self
 
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, tokens: torch.Tensor, return_transformer_output: bool = False) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
 
@@ -410,5 +410,7 @@ class Transformer(nn.Module):
         h = self.norm(h)
         
         logits = self.output(h) # Standard nn.Linear for output
-        
-        return logits
+        if return_transformer_output:
+            return logits, h
+        else:
+            return logits

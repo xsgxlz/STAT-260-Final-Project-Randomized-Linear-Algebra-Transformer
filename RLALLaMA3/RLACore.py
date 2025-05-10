@@ -181,7 +181,9 @@ def sample_and_project_mm(A, B, sample_without_dim, projection_dim, projection_m
     if A.shape[-1] != B.shape[-2]:
         raise ValueError(f"A.shape[-1] ({A.shape[-1]}) must match B.shape[-2] ({B.shape[-2]})")
     
-    random_tensor = torch.rand(*A.shape[:-2], A.size(-1))
+    device = A.device
+    
+    random_tensor = torch.rand(*A.shape[:-2], A.size(-1), device=device)
     permutations = torch.argsort(random_tensor, dim=-1, descending=False)
     sample_part = permutations[..., :sample_without_dim]
     projection_part = permutations[..., sample_without_dim:]
